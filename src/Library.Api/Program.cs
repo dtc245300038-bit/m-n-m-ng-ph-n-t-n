@@ -1,12 +1,23 @@
 
+using Library.Api.Hubs;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.AspNetCore.Mvc;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// =====================================
+// 1. ĐĂNG KÝ SIGNALR
+// =====================================
+
+builder.Services.AddSignalR();
+
 var app = builder.Build();
 
+// Đăng ký địa chỉ SignalR Hub
+app.MapHub<ReservationHub>("/reservationHub");
+
 // =====================================
-// 1. KHỞI TẠO DỮ LIỆU SÁCH
+// 2. KHỞI TẠO DỮ LIỆU SÁCH
 // =====================================
 
 var books = new List<Book>
@@ -38,13 +49,14 @@ var books = new List<Book>
 };
 
 // =====================================
-// 2. KHỞI TẠO DỮ LIỆU ĐẶT MƯỢN
+// 3. KHỞI TẠO DỮ LIỆU ĐẶT MƯỢN
 // =====================================
 
 var reservations = new List<Reservation>();
 
 // =====================================
-// 3. API TRANG CHỦ
+// 4. API TRANG CHỦ
+// GET /
 // =====================================
 
 app.MapGet("/", () =>
@@ -57,7 +69,7 @@ app.MapGet("/", () =>
 });
 
 // =====================================
-// 4. API LẤY DANH SÁCH SÁCH
+// 5. API LẤY DANH SÁCH SÁCH
 // GET /books
 // =====================================
 
@@ -67,7 +79,7 @@ app.MapGet("/books", () =>
 });
 
 // =====================================
-// 5. API XEM CHI TIẾT SÁCH
+// 6. API XEM CHI TIẾT SÁCH
 // GET /books/{id}
 // =====================================
 
@@ -87,7 +99,7 @@ app.MapGet("/books/{id:int}", (int id) =>
 });
 
 // =====================================
-// 6. API THÊM SÁCH
+// 7. API THÊM SÁCH
 // POST /books
 // =====================================
 
@@ -122,13 +134,18 @@ app.MapPost("/books", ([FromBody] CreateBookRequest request) =>
 });
 
 // =====================================
-// 7. API TẠO YÊU CẦU ĐẶT MƯỢN
+// 8. API TẠO YÊU CẦU ĐẶT MƯỢN
 // POST /reservations
+// KẾT HỢP SIGNALR
 // =====================================
 
-app.MapPost("/reservations", ([FromBody] CreateReservationRequest request) =>
+app.MapPost("/reservations", async (
+    [FromBody] CreateReservationRequest request,
+    IHubContext<ReservationHub> hubContext) =>
 {
-    if (request == null || request.UserId <= 0 || request.BookId <= 0)
+    if (request == null ||
+        request.UserId <= 0 ||
+        request.BookId <= 0)
     {
         return Results.BadRequest(new
         {
@@ -166,7 +183,20 @@ app.MapPost("/reservations", ([FromBody] CreateReservationRequest request) =>
         CreatedAt = DateTime.Now
     };
 
+    // Lưu yêu cầu đặt mượn
     reservations.Add(reservation);
+
+    // Gửi thông báo thời gian thực đến nhóm người dùng
+    await hubContext.Clients
+        .Group($"user-{reservation.UserId}")
+        .SendAsync("ReservationCreated", new
+        {
+            reservation.Id,
+            reservation.UserId,
+            reservation.BookId,
+            reservation.Status,
+            reservation.CreatedAt
+        });
 
     return Results.Created(
         $"/reservations/{reservation.Id}",
@@ -175,7 +205,7 @@ app.MapPost("/reservations", ([FromBody] CreateReservationRequest request) =>
 });
 
 // =====================================
-// 8. API XEM CHI TIẾT YÊU CẦU ĐẶT MƯỢN
+// 9. API XEM CHI TIẾT YÊU CẦU ĐẶT MƯỢN
 // GET /reservations/{id}
 // =====================================
 
@@ -195,7 +225,7 @@ app.MapGet("/reservations/{id:int}", (int id) =>
 });
 
 // =====================================
-// 9. API XEM YÊU CẦU CỦA NGƯỜI DÙNG
+// 10. API XEM YÊU CẦU CỦA NGƯỜI DÙNG
 // GET /users/{userId}/reservations
 // =====================================
 
@@ -209,13 +239,84 @@ app.MapGet("/users/{userId:int}/reservations", (int userId) =>
 });
 
 // =====================================
-// 10. CHẠY SERVER
+// 11. API CẬP NHẬT TRẠNG THÁI ĐẶT MƯỢN
+// PUT /reservations/{id}/status
+// KẾT HỢP SIGNALR
+// =====================================
+
+app.MapPut("/reservations/{id:int}/status", async (
+    int id,
+    [FromBody] UpdateReservationStatusRequest request,
+    IHubContext<ReservationHub> hubContext) =>
+{
+    // Kiểm tra dữ liệu đầu vào
+    if (request == null ||
+        string.IsNullOrWhiteSpace(request.Status))
+    {
+        return Results.BadRequest(new
+        {
+            message = "Trang thai khong hop le"
+        });
+    }
+
+    // Tìm yêu cầu đặt mượn
+    var reservation = reservations.FirstOrDefault(r => r.Id == id);
+
+    if (reservation == null)
+    {
+        return Results.NotFound(new
+        {
+            message = "Khong tim thay yeu cau dat muon"
+        });
+    }
+
+    // Các trạng thái được phép cập nhật
+    string[] allowedStatuses =
+    {
+        "Reserved",
+        "Rejected",
+        "Borrowed",
+        "Returned"
+    };
+
+    if (!allowedStatuses.Contains(request.Status))
+    {
+        return Results.BadRequest(new
+        {
+            message = "Trang thai khong duoc ho tro"
+        });
+    }
+
+    // Cập nhật trạng thái
+    reservation.Status = request.Status;
+
+    // Gửi thông báo thời gian thực đến đúng người dùng
+    await hubContext.Clients
+        .Group($"user-{reservation.UserId}")
+        .SendAsync("ReservationStatusChanged", new
+        {
+            reservation.Id,
+            reservation.UserId,
+            reservation.BookId,
+            reservation.Status,
+            reservation.CreatedAt
+        });
+
+    return Results.Ok(new
+    {
+        message = "Cap nhat trang thai thanh cong",
+        reservation
+    });
+});
+
+// =====================================
+// 12. CHẠY SERVER
 // =====================================
 
 app.Run();
 
 // =====================================
-// 11. CÁC LỚP DỮ LIỆU
+// 13. CÁC LỚP DỮ LIỆU
 // =====================================
 
 public class Book
@@ -258,4 +359,10 @@ public class CreateReservationRequest
     public int UserId { get; set; }
 
     public int BookId { get; set; }
+}
+
+// Lớp nhận dữ liệu cập nhật trạng thái
+public class UpdateReservationStatusRequest
+{
+    public string Status { get; set; } = "";
 }
